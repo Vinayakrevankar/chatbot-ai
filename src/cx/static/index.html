@@ -230,6 +230,62 @@
   .ticket dt { color: var(--muted); font-size: 12px; }
   .ticket dd { margin: 0; font-size: 12.5px; overflow-wrap: anywhere; }
 
+  /* Draft preview: one description field, half of which the player owns. */
+  .draft .field {
+    margin-top: 9px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--panel);
+    overflow: hidden;
+  }
+  .draft .field:focus-within { border-color: var(--accent); }
+  .draft .fieldlabel {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted); margin-top: 11px;
+  }
+  .draft textarea {
+    display: block; width: 100%;
+    border: 0; outline: 0; resize: none;
+    background: transparent;
+    color: var(--ink);
+    font: inherit; font-size: 13px;
+    padding: 10px 12px 6px;
+    min-height: 46px;
+  }
+  .draft .divider {
+    padding: 0 12px;
+    color: var(--muted);
+    font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    user-select: none;
+  }
+  /* The session transcript. Grey and read-only: it is the record of what was
+     actually said, so the player may read it but not rewrite it. */
+  .draft .history {
+    padding: 6px 12px 11px;
+    color: var(--muted);
+    font-size: 12.5px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 190px;
+    overflow-y: auto;
+    cursor: default;
+  }
+  .draft .actions { display: flex; gap: 8px; margin-top: 11px; }
+  .draft .send {
+    font: inherit; font-size: 13px; font-weight: 600;
+    background: var(--accent); color: var(--accent-ink);
+    border: 0; border-radius: 8px; padding: 8px 16px; cursor: pointer;
+  }
+  .draft .send:disabled { opacity: .5; cursor: not-allowed; }
+  .draft .drop {
+    font: inherit; font-size: 13px;
+    background: transparent; color: var(--muted);
+    border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 14px; cursor: pointer;
+  }
+  .draft .drop:hover { color: var(--ink); border-color: var(--muted); }
+  .draft .note { color: var(--muted); font-size: 11.5px; margin-top: 8px; }
+
   .starters { display: flex; flex-wrap: wrap; gap: 8px; }
   .starters button {
     font: inherit; font-size: 13px;
@@ -370,6 +426,83 @@ function renderCitations(bubble, text, details) {
   }
 }
 
+function buildDraft(d) {
+  const box = el('div', 'ticket draft');
+  const row = el('div', 'row');
+  row.appendChild(el('span', 'id', d.id));
+  row.appendChild(el('span', 'label', 'draft — not sent yet'));
+  box.appendChild(row);
+
+  const dl = el('dl');
+  const add = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
+  add('Issue', d.label);
+  if (d.match_id) add('Match ID', d.match_id);
+  box.appendChild(dl);
+
+  box.appendChild(el('div', 'fieldlabel', 'Description'));
+  const field = el('div', 'field');
+
+  const ta = el('textarea');
+  ta.value = d.summary;
+  ta.setAttribute('aria-label', 'Ticket description');
+  ta.addEventListener('input', () => {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  });
+  field.appendChild(ta);
+
+  field.appendChild(el('div', 'divider', d.divider));
+  // Rendered as text, never as an input: the chat history is a record, not a
+  // field. Selectable so it can be copied, but not editable.
+  field.appendChild(el('div', 'history', d.transcript));
+  box.appendChild(field);
+
+  const actions = el('div', 'actions');
+  const send = el('button', 'send', 'Send ticket');
+  const drop = el('button', 'drop', 'Discard');
+  actions.append(send, drop);
+  box.appendChild(actions);
+  box.appendChild(el('div', 'note', 'Nothing is filed until you send it. The greyed chat history is included automatically.'));
+
+  send.onclick = async () => {
+    send.disabled = drop.disabled = true;
+    send.textContent = 'Sending…';
+    try {
+      const res = await fetch('/api/ticket/submit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, summary: ta.value }),
+      });
+      const out = await res.json();
+      if (!out.ok) throw new Error(out.error || 'Could not send the ticket.');
+      box.replaceWith(buildTicket({
+        id: out.ticket_id, label: out.label,
+        match_id: out.match_id, summary: ta.value.trim(),
+      }));
+    } catch (err) {
+      send.disabled = drop.disabled = false;
+      send.textContent = 'Send ticket';
+      box.appendChild(el('div', 'error', err.message));
+    }
+  };
+
+  drop.onclick = async () => {
+    await fetch('/api/ticket/discard', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    box.replaceWith(el('div', 'note', 'Draft discarded — no ticket was created.'));
+  };
+
+  // Size the editable half to its content once it is in the document.
+  requestAnimationFrame(() => {
+    ta.style.height = 'auto';
+    ta.style.height = ta.scrollHeight + 'px';
+  });
+  return box;
+}
+
 function buildTicket(t) {
   const box = el('div', 'ticket');
   const row = el('div', 'row');
@@ -465,11 +598,11 @@ async function submit() {
           details = buildSources(ev);
           if (details) col.appendChild(details);
         } else if (ev.type === 'done') {
-          // A ticket card supersedes the plain Match ID badge — it already
+          // The draft card supersedes the plain Match ID badge — it already
           // shows the ID, and two chips saying the same thing is noise.
-          if (ev.ticket) {
+          if (ev.draft) {
             knownMatchId = ev.match_id;
-            col.appendChild(buildTicket(ev.ticket));
+            col.appendChild(buildDraft(ev.draft));
           } else if (ev.match_id && ev.match_id !== knownMatchId) {
             knownMatchId = ev.match_id;
             const badge = el('div', 'matchid');

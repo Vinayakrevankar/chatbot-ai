@@ -112,6 +112,55 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return 0
 
 
+def _review_draft(conversation, draft) -> None:
+    """Show the drafted ticket and let the player edit it before it is raised."""
+    from .answer import discard_ticket, submit_ticket
+    from .tickets import DIVIDER
+
+    print(f"\n  ┌─ draft ticket {draft.ticket_id} — not sent yet")
+    print(f"  │  issue    : {draft.label}")
+    if draft.match_id:
+        print(f"  │  match ID : {draft.match_id}")
+    print("  │  description:")
+    for line in draft.summary.splitlines() or [""]:
+        print(f"  │    {line}")
+    print(f"  │    {DIVIDER}")
+    for line in draft.render_transcript().splitlines():
+        # Dimmed, matching the greyed-out history in the web UI.
+        print(f"  │    \033[90m{line}\033[0m")
+    print("  └─")
+
+    try:
+        choice = input("  [s]end / [e]dit description / [d]iscard > ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if choice.startswith("e"):
+        print("  New description (blank line to finish):")
+        lines = []
+        while True:
+            try:
+                line = input("    ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            if not line:
+                break
+            lines.append(line)
+        if lines:
+            draft.summary = "\n".join(lines)
+        choice = "s"
+
+    if choice.startswith("s"):
+        ticket = submit_ticket(conversation)
+        print(f"  ticket {ticket.ticket_id} sent.")
+    elif choice.startswith("d"):
+        discard_ticket(conversation)
+        print("  draft discarded — no ticket was created.")
+    else:
+        print("  left as a draft.")
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     index = Index.load(config.INDEX_DIR)
     conversation = Conversation()
@@ -143,12 +192,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
         )
         if args.show_sources:
             _print_sources(result.hits)
-        if result.ticket:
-            t = result.ticket
-            print(f"\n  ── ticket {t.ticket_id} created ──")
-            print(f"     issue    : {t.label}")
-            print(f"     match ID : {t.match_id}")
-            print(f"     reported : {t.summary}")
+        draft = conversation.pending_ticket
+        if draft:
+            _review_draft(conversation, draft)
         elif result.match_id:
             print(f"\n  [Match ID on file: {result.match_id}]")
         print("\n")

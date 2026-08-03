@@ -199,19 +199,28 @@ sampling. The rules:
 1. The thread mentions a match-level problem → ask for the Match ID, once.
 2. The player says they don't have it → never ask again; explain where to find
    it in the app instead.
-3. The player gives it → a ticket opens automatically, and the reply quotes both
-   the Match ID and the ticket reference.
+3. The player gives it → a ticket is **drafted and shown to them**, not filed.
 
-Tickets land in `tickets/tickets.jsonl` with the category, the Match ID, the
-player's own words, the transcript and the articles consulted:
+Nothing reaches `tickets/tickets.jsonl` until the player sends it. The draft
+renders as one description field in two halves:
+
+- the **summary**, in normal text, which they can rewrite freely;
+- below a `----------` divider, the **session transcript**, greyed out and not
+  editable — a plain `div`, not a disabled input, so there is no field to
+  re-enable.
+
+Only the summary comes back from the client. The transcript half is composed
+server-side at submission from the conversation the server itself recorded, so
+what an agent reads is what was actually said. `Send ticket` calls
+`/api/ticket/submit`, `Discard` calls `/api/ticket/discard` and leaves nothing
+behind. The CLI shows the same preview with `[s]end / [e]dit / [d]iscard`.
+
+The reference is reserved when the draft is built so the reply can quote it, but
+`submit_ticket` is the only place a ticket is ever written.
 
 ```bash
 .venv/bin/cx tickets -v
 ```
-
-The ticket reference is reserved before generation and written after, so a
-failed generation leaves no orphan ticket, and the model can still quote the
-reference in its reply.
 
 **These tickets are local files, not Zendesk.** Filing into a real helpdesk
 sends player data off the machine and needs credentials, which is an operator

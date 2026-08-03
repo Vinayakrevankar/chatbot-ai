@@ -45,6 +45,10 @@ CATEGORY_LABELS = {
 }
 
 
+# Separates the part the player may edit from the transcript underneath it.
+DIVIDER = "-" * 10
+
+
 @dataclass
 class Ticket:
     ticket_id: str
@@ -61,13 +65,28 @@ class Ticket:
     def label(self) -> str:
         return CATEGORY_LABELS.get(self.category, CATEGORY_LABELS["match_issue"])
 
+    def render_transcript(self) -> str:
+        speaker = {"user": "Player", "assistant": "Assistant"}
+        return "\n\n".join(
+            f"{speaker.get(m['role'], m['role'])}: {m['content'].strip()}"
+            for m in self.transcript
+        )
+
+    def render_description(self) -> str:
+        """Editable summary, the divider, then the session transcript.
+
+        The transcript half is composed server-side at submission rather than
+        accepted from the client, so what an agent reads is the conversation
+        that actually happened.
+        """
+        return f"{self.summary.strip()}\n\n{DIVIDER}\n\n{self.render_transcript()}"
+
     def to_zendesk_payload(self) -> dict:
         """Shape this ticket the way the Zendesk Tickets API expects.
 
         Unused until someone supplies credentials and decides to file for real.
         """
-        body = [f"Match ID: {self.match_id or 'not provided'}", "", "Transcript:"]
-        body += [f"{m['role']}: {m['content']}" for m in self.transcript]
+        body = [f"Match ID: {self.match_id or 'not provided'}", "", self.render_description()]
         if self.articles:
             body += ["", "Help-center articles consulted:"]
             body += [f"- {a['title']} (article {a['id']})" for a in self.articles]

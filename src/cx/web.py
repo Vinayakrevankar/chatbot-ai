@@ -19,8 +19,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from . import config
-from .answer import Conversation, commit, prepare
+from . import config, tickets
+from .answer import Conversation, commit, discard_ticket, prepare, submit_ticket
 from .answer import _chat_stream  # streaming primitive, shared with the CLI
 from .config import REFUSAL
 from .embed import OllamaError
@@ -130,18 +130,21 @@ def _stream_reply(req: ChatRequest, session_id: str) -> Iterator[str]:
             prepared.ticket.session_id = session_id
         commit(conversation, req.message, reply, prepared)
 
-        ticket = prepared.ticket
+        draft = conversation.pending_ticket
         yield _event(
             "done",
             match_id=conversation.match_id,
-            ticket=(
+            # A draft, not a ticket: nothing is filed until the player sends it.
+            draft=(
                 {
-                    "id": ticket.ticket_id,
-                    "label": ticket.label,
-                    "match_id": ticket.match_id,
-                    "summary": ticket.summary,
+                    "id": draft.ticket_id,
+                    "label": draft.label,
+                    "match_id": draft.match_id,
+                    "summary": draft.summary,
+                    "transcript": draft.render_transcript(),
+                    "divider": tickets.DIVIDER,
                 }
-                if ticket
+                if draft
                 else None
             ),
         )
@@ -160,6 +163,38 @@ def chat(req: ChatRequest) -> StreamingResponse:
         media_type="application/x-ndjson",
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )
+
+
+class TicketAction(BaseModel):
+    session_id: str
+    # The edited half of the description. The transcript below the divider is
+    # never taken from the client.
+    summary: str | None = None
+
+
+@app.post("/api/ticket/submit")
+def raise_ticket(payload: TicketAction) -> dict:
+    conversation = _sessions.get(payload.session_id)
+    if conversation is None or conversation.pending_ticket is None:
+        return {"ok": False, "error": "There is no draft ticket to send."}
+
+    conversation.pending_ticket.session_id = payload.session_id
+    ticket = submit_ticket(conversation, payload.summary)
+    return {
+        "ok": True,
+        "ticket_id": ticket.ticket_id,
+        "label": ticket.label,
+        "match_id": ticket.match_id,
+        "created_at": ticket.created_at,
+    }
+
+
+@app.post("/api/ticket/discard")
+def drop_ticket(payload: TicketAction) -> dict:
+    conversation = _sessions.get(payload.session_id)
+    if conversation is None:
+        return {"ok": False, "error": "Unknown session."}
+    return {"ok": discard_ticket(conversation)}
 
 
 @app.post("/api/reset")

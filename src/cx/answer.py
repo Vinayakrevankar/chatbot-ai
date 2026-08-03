@@ -88,18 +88,19 @@ of the app it happened in. Stay warm and brief."""
 # kept echoing its own previous "could you tell me more?" turn instead of
 # actually closing the loop. A canned message is also instant.
 ESCALATION_TEXT = (
-    "I'm not able to pin this down from the help center, so I've passed it to a "
-    "human support agent. Your reference is {ticket_id} — an agent will pick it "
-    "up and follow up with you. If you think of any extra detail meanwhile, add "
-    "it here and it'll reach them."
+    "I'm not able to pin this down from the help center, so let's get a human "
+    "support agent on it. I've drafted ticket {ticket_id} below — have a read, "
+    "edit the description if you'd like, and send it when you're happy."
 )
 
 CONFIRM_MATCH_ID = """
 
-The player has provided Match ID {match_id}, and support ticket {ticket_id} has \
-been opened for them. Tell them both references in one short sentence, say an \
-agent will follow up, then answer anything else they asked. Do not invent any \
-other reference number, timeframe or status."""
+The player has provided Match ID {match_id}, and a DRAFT ticket {ticket_id} is \
+now shown below your reply for them to review, edit and send. In one short \
+sentence: confirm the Match ID, and tell them to check the draft below and send \
+it when ready. Do NOT say the ticket has been created, opened, raised or \
+submitted — it has not been, and it will not be until they send it. Then answer \
+anything else they asked."""
 
 # How many prior messages to carry. Support threads are short; more history
 # mostly adds latency and lets stale topics pull retrieval off course.
@@ -149,6 +150,16 @@ class Conversation:
     match_id_asks: int = 0
     clarify_asks: int = 0
     ticket_id: str | None = None
+    # Drafted and shown to the player for review. Becomes a real ticket only
+    # when they submit it.
+    pending_ticket: Ticket | None = None
+
+    @property
+    def ticket_in_flight(self) -> str | None:
+        """Reference of the ticket already raised or awaiting the player."""
+        if self.ticket_id:
+            return self.ticket_id
+        return self.pending_ticket.ticket_id if self.pending_ticket else None
 
 
 @dataclass
@@ -462,7 +473,7 @@ def prepare(
     escalate = False
     canned = None
 
-    if match_id and not conversation.ticket_id:
+    if match_id and not conversation.ticket_in_flight:
         ticket = _reserve_ticket(question, conversation, hits, match_id=match_id)
         directive = CONFIRM_MATCH_ID.format(
             match_id=match_id, ticket_id=ticket.ticket_id
@@ -472,9 +483,8 @@ def prepare(
         # short reply is an answer to our question, not a vague request.
         if conversation.clarify_asks >= 1:
             escalate = True
-            if conversation.ticket_id:
-                reference = conversation.ticket_id
-            else:
+            reference = conversation.ticket_in_flight
+            if not reference:
                 ticket = _reserve_ticket(
                     question, conversation, hits, category="unclear_request"
                 )
@@ -512,10 +522,43 @@ def commit(
         conversation.match_id_asks += 1
     if prepared.asked_to_clarify:
         conversation.clarify_asks += 1
-    # Written only now, so a failed generation leaves no orphan ticket.
-    if prepared.ticket and not conversation.ticket_id:
-        write_ticket(prepared.ticket)
-        conversation.ticket_id = prepared.ticket.ticket_id
+    # Held as a draft, not written. The player reviews it first; `submit_ticket`
+    # is what actually raises it.
+    if prepared.ticket and not conversation.ticket_in_flight:
+        conversation.pending_ticket = prepared.ticket
+        # The transcript has to include the turn that just finished, or the
+        # player reviews a history missing its own last exchange.
+        prepared.ticket.transcript = list(conversation.history)
+
+
+def submit_ticket(
+    conversation: Conversation, summary: str | None = None
+) -> Ticket | None:
+    """Raise the drafted ticket. This is the only place a ticket is written.
+
+    `summary` is the player's edited description. Only that half is taken from
+    them — the transcript below the divider is composed from the conversation,
+    so it cannot be rewritten on the way out.
+    """
+    ticket = conversation.pending_ticket
+    if ticket is None:
+        return None
+
+    if summary is not None and summary.strip():
+        ticket.summary = summary.strip()
+
+    write_ticket(ticket)
+    conversation.ticket_id = ticket.ticket_id
+    conversation.pending_ticket = None
+    return ticket
+
+
+def discard_ticket(conversation: Conversation) -> bool:
+    """Throw away the draft without raising anything."""
+    if conversation.pending_ticket is None:
+        return False
+    conversation.pending_ticket = None
+    return True
 
 
 def answer(
