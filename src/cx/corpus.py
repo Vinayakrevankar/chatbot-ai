@@ -17,6 +17,14 @@ _ARTICLE_ID = re.compile(r"^(\d+)-")
 _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _HEADING = re.compile(r"^\s*#{1,6}\s+")
 _WORD = re.compile(r"[a-z0-9']+")
+_PAYOUT_ROW = re.compile(r"^\$[\d,]+(\.\d{2})?$")
+
+# Zendesk exports occasionally include a league results table: hundreds of rows
+# of player display name, score and prize. They answer no support question and
+# are full of personal data, so they are kept out of the index — which matters
+# most when the assistant is exposed beyond localhost. One article in this
+# corpus trips this; the next one closest has zero payout rows.
+LEADERBOARD_ROW_THRESHOLD = 25
 # A fragment starting with one of these is a continuation, not a new word.
 _TRAILING_PUNCT = re.compile(r"^[.,;:!?)%\]]")
 
@@ -110,6 +118,12 @@ def load_articles(data_dir: Path) -> list[Article]:
         articles.append(Article(article_id, title, body, path))
 
     return articles
+
+
+def looks_like_leaderboard(body: str) -> bool:
+    """True for articles that are mostly a table of players and their prizes."""
+    rows = sum(1 for line in body.splitlines() if _PAYOUT_ROW.match(line.strip()))
+    return rows >= LEADERBOARD_ROW_THRESHOLD
 
 
 def _word_set(text: str) -> frozenset[str]:
@@ -217,8 +231,16 @@ def chunk_article(article: Article) -> list[Chunk]:
     ]
 
 
-def build_chunks(data_dir: Path) -> tuple[list[Chunk], list[Article], list[tuple[str, str]]]:
+def build_chunks(
+    data_dir: Path,
+) -> tuple[list[Chunk], list[Article], list[tuple[str, str]], list[Article]]:
     articles = load_articles(data_dir)
+
+    withheld = [a for a in articles if looks_like_leaderboard(a.body)]
+    if withheld:
+        excluded = {a.article_id for a in withheld}
+        articles = [a for a in articles if a.article_id not in excluded]
+
     articles, merges = dedupe(articles)
     chunks = [c for a in articles for c in chunk_article(a)]
-    return chunks, articles, merges
+    return chunks, articles, merges, withheld

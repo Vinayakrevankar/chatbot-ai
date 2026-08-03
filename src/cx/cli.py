@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,12 +35,17 @@ def cmd_sync(args: argparse.Namespace) -> int:
 
 def cmd_ingest(args: argparse.Namespace) -> int:
     print(f"Reading {config.DATA_DIR} ...")
-    chunks, articles, merges = build_chunks(config.DATA_DIR)
+    chunks, articles, merges, withheld = build_chunks(config.DATA_DIR)
     if not chunks:
         print(f"No markdown found in {config.DATA_DIR}.", file=sys.stderr)
         return 1
 
-    print(f"  {len(articles) + len(merges)} articles read")
+    for article in withheld:
+        print(
+            f"  withheld {article.article_id}: {article.title[:52]}"
+            f"\n    (league results table — player names and payouts, not support content)"
+        )
+    print(f"  {len(articles) + len(merges) + len(withheld)} articles read")
     print(f"  {len(merges)} near-duplicates merged -> {len(articles)} unique")
     print(f"  {len(chunks)} chunks")
     print(f"Embedding with {config.EMBED_MODEL} ...")
@@ -50,6 +56,9 @@ def cmd_ingest(args: argparse.Namespace) -> int:
         # Every source article stays searchable: a merged twin is reachable
         # through its alias, so `source_articles` is what the KB actually covers.
         "source_articles": len(articles) + len(merges),
+        "withheld_articles": [
+            {"id": a.article_id, "title": a.title} for a in withheld
+        ],
         "articles": len(articles),
         "chunks": len(chunks),
         "merged_duplicates": [{"kept": k, "dropped": d} for k, d in merges],
@@ -145,6 +154,82 @@ def cmd_chat(args: argparse.Namespace) -> int:
         print("\n")
 
 
+def cmd_tunnel(args: argparse.Namespace) -> int:
+    """Serve the UI and expose it through an ngrok tunnel."""
+    import secrets
+    import shutil
+    import time
+    import urllib.request
+
+    if not shutil.which("ngrok"):
+        print("ngrok is not installed. `brew install ngrok`", file=sys.stderr)
+        return 1
+
+    Index.load(config.INDEX_DIR)
+
+    # Never expose this without credentials. Generating them is friendlier than
+    # refusing, and a generated password beats whatever would be typed here.
+    user = args.user or os.environ.get("CX_AUTH_USER") or "skillz"
+    password = os.environ.get("CX_AUTH_PASS") or secrets.token_urlsafe(12)
+
+    env = {**os.environ, "CX_AUTH_USER": user, "CX_AUTH_PASS": password}
+    server = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "cx.web:app",
+         "--host", "127.0.0.1", "--port", str(args.port)],
+        env=env,
+    )
+    tunnel = subprocess.Popen(
+        ["ngrok", "http", str(args.port), "--log", "stdout"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    public_url = None
+    try:
+        # ngrok publishes the assigned URL on its local API once connected.
+        for _ in range(40):
+            time.sleep(0.5)
+            try:
+                with urllib.request.urlopen(
+                    "http://127.0.0.1:4040/api/tunnels", timeout=2
+                ) as r:
+                    tunnels = json.load(r).get("tunnels", [])
+                public_url = next(
+                    (t["public_url"] for t in tunnels if t["public_url"].startswith("https")),
+                    None,
+                )
+                if public_url:
+                    break
+            except Exception:
+                continue
+
+        if not public_url:
+            print("Could not read the tunnel URL from ngrok.", file=sys.stderr)
+            return 1
+
+        # flush=True: stdout is block-buffered when redirected, which otherwise
+        # hides the credentials until the process exits — exactly the moment
+        # they stop being useful.
+        print(f"\n  public URL : {public_url}", flush=True)
+        print(f"  username   : {user}", flush=True)
+        print(f"  password   : {password}", flush=True)
+        print(
+            "\n  Anyone with the URL and these credentials can use your local"
+            "\n  model. Ctrl-C closes the tunnel.\n",
+            flush=True,
+        )
+        server.wait()
+    except KeyboardInterrupt:
+        print("\nclosing tunnel")
+    finally:
+        for proc in (tunnel, server):
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    return 0
+
+
 def cmd_tickets(args: argparse.Namespace) -> int:
     from . import tickets as tickets_mod
 
@@ -235,6 +320,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-t", "--temperature", type=float, default=0.1)
     p.add_argument("--no-sources", dest="show_sources", action="store_false")
     p.set_defaults(func=cmd_chat)
+
+    p = sub.add_parser("tunnel", help="expose the chat UI publicly via ngrok")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--user", help="basic-auth username (default: skillz)")
+    p.set_defaults(func=cmd_tunnel)
 
     p = sub.add_parser("tickets", help="list tickets opened by the assistant")
     p.add_argument("-n", "--limit", type=int, default=20)

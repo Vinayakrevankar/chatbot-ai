@@ -92,6 +92,31 @@ Refresh the knowledge base from S3, then re-index:
 .venv/bin/cx sync && .venv/bin/cx ingest
 ```
 
+## Exposing it publicly
+
+```bash
+.venv/bin/cx tunnel
+```
+
+Starts the server, opens an ngrok tunnel, and prints the public URL with
+generated HTTP Basic credentials. Requires `ngrok` on PATH with an authtoken
+configured.
+
+Two things are enforced rather than left to the operator, because the failure
+mode is silent:
+
+**Auth is not optional through the tunnel.** The server runs open on localhost,
+which is fine, but `cx tunnel` always sets credentials — an unauthenticated
+public endpoint is an invitation to run inference on someone else's GPU, and the
+bill for that is your laptop's battery and everyone's latency.
+
+**Leaderboard articles never reach the index.** The export includes a league
+results table listing roughly a thousand player display names against their
+payout amounts. It answers no support question, and before this it was
+retrievable at rank 2 for "all star league winners prizes" — which would have
+served real players' names and winnings to anyone with the URL. `cx ingest` now
+detects that shape (25+ payout rows) and withholds it, naming what it withheld.
+
 ## How it works
 
 | Stage | What happens |

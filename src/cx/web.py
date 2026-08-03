@@ -7,13 +7,16 @@ retrieval finishes, while the answer is still being generated.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
+import secrets
 import uuid
 from pathlib import Path
 from typing import Iterator
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from . import config
@@ -34,6 +37,38 @@ _index: Index | None = None
 # single-user local tool, and support transcripts are not worth persisting
 # without a retention decision behind them.
 _sessions: dict[str, Conversation] = {}
+
+
+@app.middleware("http")
+async def require_auth(request: Request, call_next):
+    """HTTP Basic, applied to everything, when credentials are configured.
+
+    Off by default so localhost stays frictionless; `cx tunnel` sets it before
+    exposing the server, because an open endpoint is an open invitation to run
+    inference on someone else's GPU.
+    """
+    if not config.AUTH_USER:
+        return await call_next(request)
+
+    header = request.headers.get("authorization", "")
+    supplied_user = supplied_pass = ""
+    if header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(header[6:]).decode("utf-8")
+            supplied_user, _, supplied_pass = decoded.partition(":")
+        except (binascii.Error, UnicodeDecodeError):
+            pass
+
+    # compare_digest on both halves regardless, so a wrong username and a wrong
+    # password take the same time to reject.
+    ok = secrets.compare_digest(supplied_user, config.AUTH_USER)
+    ok &= secrets.compare_digest(supplied_pass, config.AUTH_PASS)
+    if not ok:
+        return Response(
+            status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Skillz Support"'},
+        )
+    return await call_next(request)
 
 
 def get_index() -> Index:

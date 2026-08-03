@@ -36,6 +36,12 @@ TOP_K = 5
 # Reciprocal-rank-fusion damping. 60 is the value from the original RRF paper.
 RRF_K = 60
 
+# HTTP Basic credentials. Empty means no auth, which is fine on localhost and
+# not fine the moment the server is reachable from anywhere else — `cx tunnel`
+# refuses to start without these.
+AUTH_USER = os.environ.get("CX_AUTH_USER", "")
+AUTH_PASS = os.environ.get("CX_AUTH_PASS", "")
+
 REFUSAL = (
     "I don't have that in the help center — let me hand you to a support agent."
 )
