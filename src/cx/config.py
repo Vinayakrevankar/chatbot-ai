@@ -11,17 +11,27 @@ DATA_DIR = Path(os.environ.get("CX_DATA_DIR", ROOT / "data" / "articles"))
 INDEX_DIR = Path(os.environ.get("CX_INDEX_DIR", ROOT / "index"))
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-EMBED_MODEL = os.environ.get("CX_EMBED_MODEL", "nomic-embed-text")
+# bge-m3 covers 100+ languages. The knowledge base is English, but players are
+# not: nomic-embed-text scored a Spanish question at 0.50 against its own
+# English answer, under the vagueness floor, so non-English players were asked
+# to rephrase and then escalated. bge-m3 matches across languages directly.
+EMBED_MODEL = os.environ.get("CX_EMBED_MODEL", "bge-m3")
 # qwen2.5:14b (~9GB at 4-bit) is the largest model that sits comfortably in
 # 16GB alongside the embedder. It follows the grounding rules more reliably
 # than llama3.1:8b and resolves vague follow-ups better, at roughly twice the
 # latency. Set CX_CHAT_MODEL=llama3.1:8b to trade accuracy back for speed.
 CHAT_MODEL = os.environ.get("CX_CHAT_MODEL", "qwen2.5:14b-instruct")
 
-# nomic-embed-text is trained with task prefixes; using them lifts retrieval
-# quality noticeably over embedding raw text on both sides.
-EMBED_DOC_PREFIX = "search_document: "
-EMBED_QUERY_PREFIX = "search_query: "
+# Task prefixes are per-model, not universal. nomic-embed-text is trained with
+# them and loses quality without them; bge-m3 is trained without them and loses
+# quality with them, since the prefix is just unexpected tokens. Getting this
+# wrong degrades retrieval silently, so it is keyed off the model name.
+_EMBED_PREFIXES = {
+    "nomic-embed-text": ("search_document: ", "search_query: "),
+}
+EMBED_DOC_PREFIX, EMBED_QUERY_PREFIX = _EMBED_PREFIXES.get(
+    EMBED_MODEL.split(":")[0], ("", "")
+)
 
 # Articles are small (median ~800 chars), so most become a single chunk and
 # keep their full context. Only the handful of long ones get split.

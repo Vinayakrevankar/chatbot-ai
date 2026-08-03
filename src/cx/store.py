@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,22 @@ from .config import INDEX_DIR, RRF_K, TOP_K
 from .corpus import Chunk
 from .embed import embed, embed_query
 
-_TOKEN = re.compile(r"[a-z0-9']+")
+# Unicode-aware: `[a-z0-9']+` matched nothing at all in Hindi or Japanese, so
+# any such message looked like it contained no words. `[^\W_]` is "letter or
+# digit in any script", and the apostrophe group keeps contractions whole so
+# "don't" stays one token rather than becoming "don" and "t".
+#
+# Combining marks have to be spelled out. Python's `\w` excludes them, so the
+# vowel signs in "निकासी" read as separators and the word shattered into 1-2
+# character fragments. The range covers the diacritics and the Indic and Thai
+# blocks, which all sit below U+2000.
+_COMBINING = "".join(
+    chr(c)
+    for c in range(0x0300, 0x2000)
+    if unicodedata.category(chr(c)) in {"Mn", "Mc"}
+)
+_WORDCHAR = rf"(?:[^\W_]|[{re.escape(_COMBINING)}])"
+_TOKEN = re.compile(rf"{_WORDCHAR}+(?:['’]{_WORDCHAR}+)*", re.UNICODE)
 
 BM25_K1 = 1.5
 BM25_B = 0.75
@@ -73,6 +89,12 @@ class Hit:
     # and comparable across queries, which is what makes it usable as a
     # confidence signal for "did we understand the question at all".
     dense_score: float = 0.0
+    # Best cosine anywhere in the corpus for this query, repeated on each hit.
+    # It answers "did anything match?", which is not the same as the best score
+    # among the returned hits — RRF and per-article dedup can leave the closest
+    # chunk out of the top-k, and reading confidence off the survivors then
+    # understates it.
+    query_top_dense: float = 0.0
 
 
 class Index:
@@ -125,10 +147,16 @@ class Index:
 
         dense = self.embeddings @ embed_query(query)
         lexical = self.bm25.scores(query)
+        top_dense = float(dense.max())
 
         pool = min(pool, len(self.chunks))
         dense_order = np.argsort(-dense)[:pool]
-        lexical_order = np.argsort(-lexical)[:pool]
+        # A zero BM25 score means no query term occurs in the chunk, which is
+        # not weak evidence of relevance — it is none. Ranking those anyway
+        # handed real RRF weight to whatever `argsort` happened to put first,
+        # and for a query in a language the corpus does not use, that is every
+        # chunk: Spanish recall@1 sat at 0.11 purely on that noise.
+        lexical_order = [i for i in np.argsort(-lexical)[:pool] if lexical[i] > 0]
 
         dense_rank = {int(idx): r for r, idx in enumerate(dense_order)}
         lexical_rank = {int(idx): r for r, idx in enumerate(lexical_order)}
@@ -154,6 +182,7 @@ class Index:
                     dense_rank=dense_rank.get(idx),
                     lexical_rank=lexical_rank.get(idx),
                     dense_score=float(dense[idx]),
+                    query_top_dense=top_dense,
                 )
             )
             if len(best) >= top_k:

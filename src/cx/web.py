@@ -20,7 +20,14 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from . import config, tickets
-from .answer import Conversation, commit, discard_ticket, prepare, submit_ticket
+from .answer import (
+    Conversation,
+    commit,
+    discard_ticket,
+    prepare,
+    submit_ticket,
+    translate_fixed_text,
+)
 from .answer import _chat_stream  # streaming primitive, shared with the CLI
 from .config import REFUSAL
 from .embed import OllamaError
@@ -101,6 +108,7 @@ def _stream_reply(req: ChatRequest, session_id: str) -> Iterator[str]:
             session_id=session_id,
             search_query=query,
             rewritten=query.strip().lower() != req.message.strip().lower(),
+            language=prepared.language,
             match_id=prepared.match_id,
             asking_for_match_id=prepared.asked_for_match_id,
             sources=[
@@ -115,7 +123,11 @@ def _stream_reply(req: ChatRequest, session_id: str) -> Iterator[str]:
             ],
         )
 
-        fixed = prepared.canned_reply or (None if prepared.hits else REFUSAL)
+        fixed = prepared.canned_reply
+        if fixed is None and not prepared.hits:
+            fixed = REFUSAL
+            if prepared.language.lower() not in {"english", "unknown"}:
+                fixed = translate_fixed_text(fixed, prepared.language)
         if fixed is not None:
             yield _event("token", text=fixed)
             reply = fixed

@@ -50,16 +50,32 @@ from the sources in the current turn."""
 # Deliberately lists no example product nouns: naming them here caused the
 # model to inject them into unrelated rewrites ("Dogecoin?" came back as a
 # question about Ticketz and Z Coins).
-CONDENSE_PROMPT = """Rewrite the player's latest message into a standalone \
-search query for a help-center search engine.
+#
+# The query stays in whatever language the player used: bge-m3 embeds a Spanish
+# question near its English answer, so translating first would only add a step
+# and a place to lose meaning. The language is reported so the reply can be
+# written back in it.
+CONDENSE_PROMPT = """You prepare help-center searches for a support assistant.
 
-Rules:
+Return JSON with exactly two fields:
+  "query"    - the player's latest message rewritten as a standalone search \
+query, in the SAME language the player used. Do not translate it.
+  "language" - the language the player wrote in, as its English name \
+("English", "Spanish", "Hindi", "Japanese", ...).
+
+Rules for "query":
 - Resolve pronouns and references using the conversation.
-- Keep every noun and product name the player actually wrote, spelled the same \
-way.
-- Never introduce a topic, product or term the player did not mention.
+- Keep every noun and product name the player wrote, spelled the same way.
+- Never introduce a topic or product the player did not mention.
 - If the message already stands alone, return it unchanged.
-- Output the query only. No quotes, no explanation, no preamble."""
+- No quotes, no explanation."""
+
+REPLY_IN_LANGUAGE = """
+
+The player wrote in {language}. Write your entire reply in {language}, \
+including any question you ask them. The sources are in English; translate what \
+you use from them. Leave product names, the Match ID and any ticket reference \
+exactly as they appear."""
 
 # Appended to the system prompt for the turn. Asking is a policy decision, so
 # it is decided in code and handed to the model as an instruction.
@@ -130,15 +146,20 @@ _STOPWORDS = frozenset(
 # roughly "appears in six chunks or fewer".
 _DISTINCTIVE_IDF = 3.0
 
-# Measured on this corpus: real questions bottom out around 0.74 top cosine
-# ("my game crashed" 0.742), while vague ones top out around 0.738 ("game").
-# The floor sits just under the clear band, so borderline queries get answered
-# rather than interrogated — being asked to rephrase a fair question is worse
-# than a slightly loose answer.
-_VAGUE_COSINE_FLOOR = 0.72
-# A lone content word needs a stronger match to count as a real question:
-# "What are Ticketz?" scores 0.766, "game" only 0.738.
-_LONE_TERM_COSINE = 0.75
+# Re-measured for bge-m3; the old 0.72/0.75 pair was calibrated against
+# nomic-embed-text and means nothing here. Cosines on this corpus:
+#   clear English   0.656 - 0.791
+#   clear other     0.575 - 0.719   (translation costs some similarity)
+#   vague           0.408 - 0.569
+# The clear and vague bands only separate by 0.006, too fine to hang the
+# decision on, so the floor sits well below at 0.55 and the single-word rule
+# does the discriminating. A real question asked in Hindi must not be told to
+# rephrase, which is exactly what a high floor would do.
+_VAGUE_COSINE_FLOOR = 0.55
+# One content word is either a product noun ("Ticketz" 0.741, "z coins" 0.660,
+# Japanese phrases tokenize as one run at 0.652+) or a plea ("help" 0.569,
+# "ayuda" 0.547, "問題" 0.487). This threshold splits them.
+_LONE_TERM_COSINE = 0.62
 
 
 @dataclass
@@ -163,12 +184,25 @@ class Conversation:
 
 
 @dataclass
+class Condensed:
+    """The English search query, plus the language the player used."""
+
+    query: str
+    language: str = "English"
+
+    @property
+    def translated(self) -> bool:
+        return self.language.strip().lower() not in {"english", "", "unknown"}
+
+
+@dataclass
 class Prepared:
     """The result of retrieval and policy, ready to hand to the model."""
 
     hits: list[Hit]
     search_query: str
     messages: list[dict]
+    language: str = "English"
     match_id: str | None = None
     asked_for_match_id: bool = False
     asked_to_clarify: bool = False
@@ -263,7 +297,7 @@ def _distinctive_terms(question: str, index: Index | None) -> set[str]:
         return set()
     terms = set()
     for token in tokenize(question):
-        if len(token) < 4 or token in _STOPWORDS:
+        if len(token) < _min_token_length(token) or token in _STOPWORDS:
             continue
         idf = index.bm25.idf.get(token)
         if idf is None or idf >= _DISTINCTIVE_IDF:
@@ -271,9 +305,23 @@ def _distinctive_terms(question: str, index: Index | None) -> set[str]:
     return terms
 
 
+def _min_token_length(token: str) -> int:
+    """Shortest a token can be and still count as a real word.
+
+    Four characters filters English filler well, but wipes out scripts that
+    pack a word into one or two characters — "समय" is "time" and 出金 is
+    "withdrawal". Those only need two.
+    """
+    return 4 if token.isascii() else 2
+
+
 def _content_terms(text: str) -> set[str]:
     """Terms substantial enough to search on at all."""
-    return {t for t in tokenize(text) if len(t) >= 4 and t not in _STOPWORDS}
+    return {
+        t
+        for t in tokenize(text)
+        if len(t) >= _min_token_length(t) and t not in _STOPWORDS
+    }
 
 
 def _last_substantive_message(history: list[dict]) -> str:
@@ -283,13 +331,32 @@ def _last_substantive_message(history: list[dict]) -> str:
     return ""
 
 
+# Function words frequent enough that two of them means English. Script alone
+# is not enough: "¿Cuánto tiempo tarda un retiro?" is 96% ASCII letters.
+_ENGLISH_MARKERS = frozenset(
+    """the is are was were how what why when where which who does do did can
+    could should would will my your our their this that these those and or of
+    for with from about into you i it""".split()
+)
+
+
+def _looks_english(text: str) -> bool:
+    """Cheap check used to skip a round trip, and to catch a mislabelled reply."""
+    letters = [c for c in text if c.isalpha()]
+    if letters and sum(1 for c in letters if c.isascii()) / len(letters) <= 0.9:
+        return False
+    return len(set(tokenize(text)) & _ENGLISH_MARKERS) >= 2
+
+
 def condense_query(
     question: str, history: list[dict] | None, index: Index | None = None
-) -> str:
-    """Rewrite a follow-up into a standalone query, with fallbacks that keep it
-    anchored to the conversation."""
-    if not history:
-        return question
+) -> Condensed:
+    """Produce an English search query, and report the player's language.
+
+    Runs on the first turn too, unlike the earlier version: a non-English
+    opening message still needs translating before it can retrieve anything.
+    """
+    history = history or []
 
     # "I don't have", "yes", "it still didn't work" contain nothing searchable.
     # Left alone they retrieve on stopword coincidence — "I don't have" once
@@ -297,6 +364,11 @@ def condense_query(
     # them to the last real thing the player asked.
     anchor = "" if _content_terms(question) else _last_substantive_message(history)
     base = f"{anchor} {question}".strip() if anchor else question
+
+    # Nothing to do for a plain English opener: no history to resolve against
+    # and no translation needed, so skip the round trip.
+    if not history and _looks_english(question):
+        return Condensed(question, "English")
 
     transcript = "\n".join(
         f"{m['role']}: {m['content']}" for m in history[-MAX_HISTORY_MESSAGES:]
@@ -311,31 +383,43 @@ def condense_query(
             },
         ],
         "stream": False,
+        "format": "json",
         # Deterministic, and capped short: this is a rewrite, not an answer.
-        "options": {"temperature": 0.0, "num_predict": 64},
+        "options": {"temperature": 0.0, "num_predict": 128},
     }
+    fallback = Condensed(base, "English" if _looks_english(question) else "unknown")
     try:
         r = _post_chat(payload, stream=False, timeout=60)
         if r.status_code != 200:
-            return base
-        rewritten = r.json().get("message", {}).get("content", "").strip()
+            return fallback
+        parsed = json.loads(r.json().get("message", {}).get("content", "") or "{}")
     except (OllamaError, ValueError, requests.exceptions.RequestException):
-        return base
+        return fallback
 
-    rewritten = rewritten.splitlines()[0].strip().strip('"').strip()
+    rewritten = str(parsed.get("query", "")).strip().strip('"').strip()
+    language = str(parsed.get("language", "") or "English").strip()
+    # A model that reports "English" while the query still carries non-Latin
+    # script got it wrong; trusting it would answer a Hindi player in English.
+    if not _looks_english(question) and _looks_english(language) and language.lower() == "english":
+        language = fallback.language
+
     # A rewrite that came back empty or rambling means the model ignored the
     # instruction; the anchored question is a safer query than a bad paraphrase.
     if not rewritten or len(rewritten) > 300:
-        return base
-
+        return fallback
     # The model often decides a bare fragment is "already standalone" and hands
     # it straight back. That is exactly the case anchoring exists for.
     if not _content_terms(rewritten):
-        return base
+        return fallback
 
+    condensed = Condensed(rewritten, language)
+
+    # The rewrite stays in the player's language, so these comparisons are
+    # still like-for-like and both guards apply whatever language was used.
+    #
     # A rewrite must not drop a distinctive term the player used...
     if _distinctive_terms(question, index) - set(tokenize(rewritten)):
-        return base
+        return Condensed(fallback.query, language)
 
     # ...nor invent one the conversation never mentioned, which is how a
     # question about Dogecoin turned into one about Ticketz.
@@ -343,9 +427,42 @@ def condense_query(
         [m.get("content", "") for m in history[-MAX_HISTORY_MESSAGES:]] + [question]
     )
     if _distinctive_terms(rewritten, index) - set(tokenize(spoken)):
-        return base
+        return Condensed(fallback.query, language)
 
-    return rewritten
+    return condensed
+
+
+def translate_fixed_text(text: str, language: str) -> str:
+    """Render a canned message in the player's language.
+
+    The refusal and escalation strings are fixed so their content cannot drift.
+    That decision is about content, not English, and leaving a Hindi player with
+    an English handoff is its own failure. Falls back to the original text.
+    """
+    payload = {
+        "model": CHAT_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    f"Translate the user's message into {language}. Output only "
+                    "the translation. Keep any reference code (like "
+                    "SKZ-20260101-AB12) exactly as written."
+                ),
+            },
+            {"role": "user", "content": text},
+        ],
+        "stream": False,
+        "options": {"temperature": 0.0, "num_predict": 160},
+    }
+    try:
+        r = _post_chat(payload, stream=False, timeout=60)
+        if r.status_code != 200:
+            return text
+        out = r.json().get("message", {}).get("content", "").strip()
+    except (OllamaError, ValueError, requests.exceptions.RequestException):
+        return text
+    return out or text
 
 
 def _issue_in_thread(question: str, history: list[dict]) -> bool:
@@ -405,7 +522,11 @@ def is_vague(query: str, hits: list[Hit]) -> bool:
     if not hits:
         return True
 
-    top = max(h.dense_score for h in hits)
+    # Corpus-wide best, not the best among the returned hits: fusion and
+    # per-article dedup can push the closest chunk out of the top-k, and
+    # measuring confidence off the survivors then reads as "we understood
+    # nothing" for a question that in fact matched well.
+    top = hits[0].query_top_dense
     if top < _VAGUE_COSINE_FLOOR:
         return True
     return len(content) == 1 and top < _LONE_TERM_COSINE
@@ -462,7 +583,8 @@ def prepare(
 ) -> Prepared:
     """Retrieve and apply policy, without calling the model for an answer yet."""
     conversation = conversation or Conversation()
-    search_query = condense_query(question, conversation.history, index)
+    condensed = condense_query(question, conversation.history, index)
+    search_query = condensed.query
     hits = index.search(search_query, top_k=top_k)
     directive, match_id, asked = _match_id_directive(question, conversation)
 
@@ -494,9 +616,19 @@ def prepare(
             clarify = True
             directive = ASK_TO_CLARIFY
 
+    # Appended last so it applies to answers, clarifying questions and Match ID
+    # requests alike — every generated reply, whatever the policy decided.
+    if condensed.translated:
+        directive += REPLY_IN_LANGUAGE.format(language=condensed.language)
+        # Canned replies skip generation, so the directive above never reaches
+        # them; they get translated directly instead.
+        if canned:
+            canned = translate_fixed_text(canned, condensed.language)
+
     return Prepared(
         hits=hits,
         search_query=search_query,
+        language=condensed.language,
         messages=build_messages(question, hits, conversation.history, directive),
         match_id=match_id,
         asked_for_match_id=asked,
@@ -574,7 +706,11 @@ def answer(
     conversation = conversation or Conversation()
     prepared = prepare(index, question, conversation, top_k)
 
-    fixed = prepared.canned_reply or (None if prepared.hits else REFUSAL)
+    fixed = prepared.canned_reply
+    if fixed is None and not prepared.hits:
+        fixed = REFUSAL
+        if prepared.language.lower() not in {"english", "unknown"}:
+            fixed = translate_fixed_text(fixed, prepared.language)
     if fixed is not None:
         if stream_to is not None:
             stream_to.write(fixed)

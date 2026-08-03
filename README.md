@@ -161,6 +161,53 @@ about Match IDs searches for the Match ID topic. This is why the stopword list
 includes contractions, and why `tokenize` normalises typographic apostrophes:
 `don’t` and `don't` have to reach the same place.
 
+### Other languages
+
+The knowledge base is English; the players are not. Skillz restricts cash play
+in India, France, Italy, Japan, Poland and others, so non-English speakers are
+in the audience.
+
+Retrieval uses `bge-m3`, which embeds a question and its answer close together
+across 100+ languages, so a Spanish question finds an English article directly.
+Nothing is translated before searching. The condense step reports which language
+the player used, and the reply — including any clarifying question, Match ID
+request or handoff — is written back in it.
+
+Measured by asking each article's own title, translated, and checking the
+article comes back:
+
+| Language | recall@1 | recall@5 |
+| --- | --- | --- |
+| English | 0.94 | 1.00 |
+| Spanish | 0.50 | 0.94 |
+| Hindi | 0.72 | 1.00 |
+| Japanese | 0.89 | 1.00 |
+
+Rank 1 is weaker than English, but five sources reach the model and recall@5 is
+0.94–1.00, so answers stay grounded. Under the previous English-only embedder
+these questions scored ~0.50 cosine against a 0.72 floor, so every one of them
+was told to rephrase and then escalated to a human.
+
+Three things had to change beyond the model swap, and each was silently wrong
+before:
+
+- **Task prefixes are per-model.** `nomic-embed-text` needs
+  `search_document:` / `search_query:`; `bge-m3` is trained without them and is
+  hurt by them. They are now keyed off the model name, because getting this
+  wrong degrades retrieval without any error.
+- **The tokenizer only matched `[a-z0-9']`.** Hindi and Japanese produced *no
+  tokens at all*, so those messages looked wordless. It is now Unicode-aware,
+  including combining marks — Devanagari vowel signs are `\W`, which shattered
+  "निकासी" into 1–2 character fragments. English tokenizes byte-identically.
+- **Zero-score BM25 results were being ranked.** For a query in a language the
+  corpus does not use, no term matches, every BM25 score is zero — and
+  `argsort` still returned an order that collected real RRF weight. Spanish
+  recall@1 was 0.11 purely on that noise; excluding zero-score chunks took it to
+  0.50, Japanese to 0.89, and left English untouched.
+
+The vagueness thresholds were re-measured for `bge-m3` (see below); the old ones
+were calibrated against a different embedder and meant nothing here.
+
 ### Vague questions
 
 "help", "problem", "not working" cannot be answered from a knowledge base, and
@@ -168,13 +215,27 @@ answering them anyway produces confident nonsense. So the assistant asks once
 for detail, and if the next message is still vague it stops guessing and hands
 off to a human, opening a ticket.
 
-Vagueness is measured, not guessed. The signal is the top dense cosine of the
-retrieved set, which unlike the fused RRF score is calibrated across queries. On
-this corpus real questions bottom out at **0.742** ("my game crashed") and vague
-ones top out at **0.738** ("game"), so the floor sits at 0.72 — deliberately
-just under the clear band, because being asked to rephrase a fair question is
-more annoying than a slightly loose answer. A query with a single content word
-needs 0.75 to count, separating "What are Ticketz?" (0.766) from "game" (0.738).
+Vagueness is measured, not guessed. The signal is the best cosine anywhere in
+the corpus, which unlike the fused RRF score is calibrated across queries.
+Measured for `bge-m3`:
+
+| | cosine range |
+| --- | --- |
+| clear, English | 0.656 – 0.791 |
+| clear, other languages | 0.575 – 0.719 |
+| vague | 0.408 – 0.569 |
+
+Clear and vague separate by only 0.006, too fine to hang a decision on, so the
+floor sits well below at **0.55** and a second rule does the discriminating: a
+query with a single content word needs **0.62**. That splits product nouns
+("Ticketz" 0.741, "z coins" 0.660, Japanese phrases 0.652+) from pleas ("help"
+0.569, "ayuda" 0.547, "問題" 0.487). A real question asked in Hindi must never
+be told to rephrase, which is exactly what a high floor would do.
+
+The confidence figure is the corpus-wide best, not the best among the returned
+hits. Fusion and per-article dedup can push the closest chunk out of the top-k,
+and reading confidence off the survivors made three genuine non-English
+questions look vague.
 
 Two details matter:
 
