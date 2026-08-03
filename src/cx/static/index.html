@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Skillz Support Assistant</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --ink: #16181d;
+    --muted: #6b7280;
+    --line: #e3e6eb;
+    --accent: #6d4aff;
+    --accent-ink: #ffffff;
+    --user-bg: #6d4aff;
+    --bot-bg: #ffffff;
+    --chip: #f1f2f6;
+    --warn-bg: #fff8e6;
+    --warn-line: #f0d9a0;
+    --warn-ink: #7a5b12;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1116;
+      --panel: #171a21;
+      --ink: #e8eaf0;
+      --muted: #9aa1ae;
+      --line: #262a34;
+      --accent: #8b6dff;
+      --user-bg: #6d4aff;
+      --bot-bg: #1c202a;
+      --chip: #222733;
+      --warn-bg: #2a2415;
+      --warn-line: #4d4020;
+      --warn-ink: #e2c988;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    height: 100dvh;
+    display: flex;
+    justify-content: center;
+  }
+
+  .app {
+    width: min(860px, 100%);
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border-inline: 1px solid var(--line);
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+  .mark {
+    width: 32px; height: 32px; flex: none;
+    border-radius: 9px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    display: grid; place-items: center;
+    font-weight: 700; font-size: 15px;
+  }
+  .title { font-weight: 650; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 12px; }
+  header .spacer { margin-left: auto; }
+
+  button.ghost {
+    font: inherit; font-size: 13px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  button.ghost:hover { color: var(--ink); border-color: var(--muted); }
+
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 22px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  .turn { display: flex; }
+  .turn.user { justify-content: flex-end; }
+
+  .bubble {
+    max-width: 82%;
+    padding: 11px 15px;
+    border-radius: var(--radius);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .turn.user .bubble {
+    background: var(--user-bg);
+    color: #fff;
+    border-bottom-right-radius: 5px;
+  }
+  .turn.bot .bubble {
+    background: var(--bot-bg);
+    border: 1px solid var(--line);
+    border-bottom-left-radius: 5px;
+  }
+  .turn.bot .col { max-width: 82%; }
+
+  .bubble cite {
+    font-style: normal;
+    background: var(--chip);
+    border: 1px solid var(--line);
+    color: var(--muted);
+    border-radius: 4px;
+    padding: 0 4px;
+    /* No right margin: punctuation after a citation should stay attached. */
+    margin: 0 0 0 2px;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1;
+    vertical-align: 2px;
+    cursor: pointer;
+  }
+  .bubble cite:hover { color: var(--accent); border-color: var(--accent); }
+
+  .handoff {
+    background: var(--warn-bg);
+    border-color: var(--warn-line);
+    color: var(--warn-ink);
+  }
+
+  details.sources {
+    margin-top: 7px;
+    font-size: 13px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--panel);
+  }
+  details.sources > summary {
+    cursor: pointer;
+    color: var(--muted);
+    padding: 7px 12px;
+    list-style: none;
+  }
+  details.sources > summary::-webkit-details-marker { display: none; }
+  details.sources > summary:hover { color: var(--ink); }
+  .src {
+    border-top: 1px solid var(--line);
+    padding: 9px 12px;
+  }
+  .src b { font-weight: 600; }
+  .src .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .src pre {
+    margin: 7px 0 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--muted);
+    font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    max-height: 170px;
+    overflow-y: auto;
+  }
+  .rewrite {
+    padding: 7px 12px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .rewrite code { color: var(--ink); }
+
+  .dots span {
+    display: inline-block; width: 6px; height: 6px; margin-right: 3px;
+    border-radius: 50%; background: var(--muted);
+    animation: blink 1.3s infinite;
+  }
+  .dots span:nth-child(2) { animation-delay: .18s; }
+  .dots span:nth-child(3) { animation-delay: .36s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: .25 } 30% { opacity: 1 } }
+
+  .error {
+    border: 1px solid var(--warn-line);
+    background: var(--warn-bg);
+    color: var(--warn-ink);
+    border-radius: 10px;
+    padding: 10px 14px;
+    font-size: 13px;
+  }
+
+  .matchid {
+    display: inline-flex; align-items: center; gap: 7px;
+    margin-top: 7px; padding: 5px 11px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    font-size: 12.5px;
+    color: var(--accent);
+  }
+  .matchid b { font-variant-numeric: tabular-nums; letter-spacing: .02em; }
+
+  .ticket {
+    margin-top: 8px;
+    border: 1px solid var(--accent);
+    border-radius: 11px;
+    padding: 11px 13px;
+    font-size: 13px;
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+  }
+  .ticket .row { display: flex; align-items: baseline; gap: 8px; }
+  .ticket .id {
+    font-weight: 700; color: var(--accent);
+    font-variant-numeric: tabular-nums; letter-spacing: .02em;
+  }
+  .ticket .label {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--muted);
+  }
+  .ticket dl { margin: 7px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; }
+  .ticket dt { color: var(--muted); font-size: 12px; }
+  .ticket dd { margin: 0; font-size: 12.5px; overflow-wrap: anywhere; }
+
+  .starters { display: flex; flex-wrap: wrap; gap: 8px; }
+  .starters button {
+    font: inherit; font-size: 13px;
+    background: var(--chip);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    border-radius: 999px;
+    padding: 7px 14px;
+    cursor: pointer;
+  }
+  .starters button:hover { border-color: var(--accent); color: var(--accent); }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding: 12px 16px 16px;
+    flex: none;
+  }
+  .composer {
+    display: flex; gap: 10px; align-items: flex-end;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 8px 8px 8px 14px;
+    background: var(--panel);
+  }
+  .composer:focus-within { border-color: var(--accent); }
+  #input {
+    flex: 1; border: 0; outline: 0; resize: none;
+    background: transparent; color: var(--ink);
+    font: inherit; max-height: 140px; padding: 4px 0;
+  }
+  #send {
+    font: inherit; font-weight: 600;
+    background: var(--accent); color: var(--accent-ink);
+    border: 0; border-radius: 9px;
+    padding: 8px 16px; cursor: pointer;
+  }
+  #send:disabled { opacity: .45; cursor: not-allowed; }
+  .disclaimer { color: var(--muted); font-size: 11.5px; text-align: center; margin-top: 9px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="mark">S</div>
+    <div>
+      <div class="title">Skillz Support</div>
+      <div class="sub" id="status">connecting…</div>
+    </div>
+    <div class="spacer"></div>
+    <button class="ghost" id="reset">New chat</button>
+  </header>
+
+  <div id="log"></div>
+
+  <footer>
+    <div class="composer">
+      <textarea id="input" rows="1" placeholder="Ask about deposits, withdrawals, Ticketz…"></textarea>
+      <button id="send">Send</button>
+    </div>
+    <div class="disclaimer">Answers come only from the Skillz help center, and cite the article used.</div>
+  </footer>
+</div>
+
+<script>
+const log = document.getElementById('log');
+const input = document.getElementById('input');
+const send = document.getElementById('send');
+const statusEl = document.getElementById('status');
+
+let sessionId = null;
+let knownMatchId = null;
+let busy = false;
+
+const STARTERS = [
+  'How long does a withdrawal take?',
+  'Can I deposit with a prepaid gift card?',
+  'What are Ticketz?',
+  'What happens if my game crashes?',
+];
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+
+function scroll() { log.scrollTop = log.scrollHeight; }
+
+function greet() {
+  const turn = el('div', 'turn bot');
+  const col = el('div', 'col');
+  const b = el('div', 'bubble');
+  b.textContent = "Hi! I can answer questions from the Skillz help center — deposits, withdrawals, Ticketz, match issues and so on. What can I help with?";
+  col.appendChild(b);
+
+  const starters = el('div', 'starters');
+  starters.style.marginTop = '10px';
+  STARTERS.forEach(q => {
+    const btn = el('button', null, q);
+    btn.onclick = () => { input.value = q; submit(); };
+    starters.appendChild(btn);
+  });
+  col.appendChild(starters);
+  turn.appendChild(col);
+  log.appendChild(turn);
+}
+
+function addUser(text) {
+  const turn = el('div', 'turn user');
+  turn.appendChild(el('div', 'bubble', text));
+  log.appendChild(turn);
+  scroll();
+}
+
+// Render [1]-style citations as chips that reveal the matching source.
+function renderCitations(bubble, text, details) {
+  bubble.textContent = '';
+  const parts = text.split(/(\[\d+\])/g);
+  for (let i = 0; i < parts.length; i++) {
+    let part = parts[i];
+    const m = part.match(/^\[(\d+)\]$/);
+    // Drop the space before a citation so the chip sits tight against the
+    // word, and the sentence's punctuation stays attached to the chip.
+    if (!m && /^\[\d+\]$/.test(parts[i + 1] || '')) part = part.replace(/\s+$/, '');
+    if (m) {
+      const c = el('cite', null, m[1]);
+      c.title = 'Show source ' + m[1];
+      c.onclick = () => {
+        if (!details) return;
+        details.open = true;
+        details.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      };
+      bubble.appendChild(c);
+    } else if (part) {
+      bubble.appendChild(document.createTextNode(part));
+    }
+  }
+}
+
+function buildTicket(t) {
+  const box = el('div', 'ticket');
+  const row = el('div', 'row');
+  row.appendChild(el('span', 'id', t.id));
+  row.appendChild(el('span', 'label', 'ticket created'));
+  box.appendChild(row);
+
+  const dl = el('dl');
+  const add = (k, v) => { dl.appendChild(el('dt', null, k)); dl.appendChild(el('dd', null, v)); };
+  add('Issue', t.label);
+  if (t.match_id) add('Match ID', t.match_id);
+  if (t.summary) add('Reported', t.summary);
+  box.appendChild(dl);
+  return box;
+}
+
+function buildSources(payload) {
+  if (!payload.sources.length) return null;
+  const d = el('details', 'sources');
+  d.appendChild(el('summary', null, `${payload.sources.length} help-center articles consulted`));
+
+  if (payload.rewritten) {
+    const r = el('div', 'rewrite');
+    r.append('Searched for ');
+    const code = el('code', null, payload.search_query);
+    r.appendChild(code);
+    d.appendChild(r);
+  }
+
+  payload.sources.forEach(s => {
+    const row = el('div', 'src');
+    const head = el('div');
+    head.appendChild(el('b', null, `[${s.n}] ${s.title}`));
+    row.appendChild(head);
+    row.appendChild(el('div', 'meta', `article ${s.article_ids.join(', ')} · rrf ${s.score}`));
+    row.appendChild(el('pre', null, s.text));
+    d.appendChild(row);
+  });
+  return d;
+}
+
+async function submit() {
+  const message = input.value.trim();
+  if (!message || busy) return;
+
+  busy = true;
+  send.disabled = true;
+  input.value = '';
+  input.style.height = 'auto';
+  addUser(message);
+
+  const turn = el('div', 'turn bot');
+  const col = el('div', 'col');
+  const bubble = el('div', 'bubble');
+  const dots = el('span', 'dots');
+  dots.innerHTML = '<span></span><span></span><span></span>';
+  bubble.appendChild(dots);
+  col.appendChild(bubble);
+  turn.appendChild(col);
+  log.appendChild(turn);
+  scroll();
+
+  let answer = '';
+  let details = null;
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, session_id: sessionId }),
+    });
+    if (!res.ok) throw new Error('Server returned ' + res.status);
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+
+      // NDJSON: complete lines only; keep any partial tail for the next read.
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const ev = JSON.parse(line);
+
+        if (ev.type === 'sources') {
+          sessionId = ev.session_id;
+          details = buildSources(ev);
+          if (details) col.appendChild(details);
+        } else if (ev.type === 'done') {
+          // A ticket card supersedes the plain Match ID badge — it already
+          // shows the ID, and two chips saying the same thing is noise.
+          if (ev.ticket) {
+            knownMatchId = ev.match_id;
+            col.appendChild(buildTicket(ev.ticket));
+          } else if (ev.match_id && ev.match_id !== knownMatchId) {
+            knownMatchId = ev.match_id;
+            const badge = el('div', 'matchid');
+            badge.append('Match ID saved: ');
+            badge.appendChild(el('b', null, ev.match_id));
+            col.appendChild(badge);
+          }
+        } else if (ev.type === 'token') {
+          answer += ev.text;
+          renderCitations(bubble, answer, details);
+          scroll();
+        } else if (ev.type === 'error') {
+          bubble.remove();
+          if (details) details.remove();
+          col.appendChild(el('div', 'error', ev.message));
+        }
+      }
+      scroll();
+    }
+
+    if (answer.includes("hand you to a support agent")) {
+      bubble.classList.add('handoff');
+    }
+  } catch (err) {
+    bubble.textContent = '';
+    col.appendChild(el('div', 'error', 'Could not reach the assistant: ' + err.message));
+  } finally {
+    busy = false;
+    send.disabled = false;
+    input.focus();
+    scroll();
+  }
+}
+
+send.onclick = submit;
+
+input.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+});
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 140) + 'px';
+});
+
+document.getElementById('reset').onclick = async () => {
+  await fetch('/api/reset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  sessionId = null;
+  knownMatchId = null;
+  log.textContent = '';
+  greet();
+  input.focus();
+};
+
+(async () => {
+  try {
+    const h = await (await fetch('/api/health')).json();
+    if (h.ok) {
+      statusEl.textContent =
+        `${h.chat_model} · ${h.source_articles} articles indexed · running locally`;
+      // The merge is a retrieval detail, not a smaller knowledge base — say so
+      // on hover rather than showing a number that looks like missing articles.
+      statusEl.title =
+        `${h.source_articles} help-center articles, ${h.chunks} chunks. ` +
+        `${h.merged} near-identical Skillz/Arena pairs are merged for retrieval ` +
+        `(${h.articles} unique); both article IDs stay citable.`;
+    } else {
+      statusEl.textContent = h.error;
+    }
+  } catch {
+    statusEl.textContent = 'server unreachable';
+  }
+})();
+
+greet();
+input.focus();
+</script>
+</body>
+</html>
