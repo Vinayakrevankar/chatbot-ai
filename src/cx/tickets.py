@@ -35,6 +35,7 @@ _CATEGORIES: list[tuple[str, str]] = [
 ]
 
 CATEGORY_LABELS = {
+    "unclear_request": "Unclear request — needs a human",
     "suspected_cheating": "Suspected cheating",
     "replay_unavailable": "Replay unavailable",
     "missing_payout": "Missing prize or payout",

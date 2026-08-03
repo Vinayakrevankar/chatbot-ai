@@ -75,6 +75,25 @@ This player has a match problem and has just indicated they do not have, or \
 cannot find, their Match ID. Do NOT ask for it again. Instead use the sources \
 to tell them exactly where to find it in the app, as short numbered steps."""
 
+ASK_TO_CLARIFY = """
+
+The player's message is too vague to answer from the help center, and the \
+retrieved sources are probably not what they meant. Do NOT answer from the \
+sources and do NOT cite anything. Instead, in at most two sentences: say you \
+want to make sure you point them at the right thing, and ask one specific \
+question that would narrow it down — what they were trying to do, or which part \
+of the app it happened in. Stay warm and brief."""
+
+# Fixed text, not generated. Handing off is a policy outcome, and the model
+# kept echoing its own previous "could you tell me more?" turn instead of
+# actually closing the loop. A canned message is also instant.
+ESCALATION_TEXT = (
+    "I'm not able to pin this down from the help center, so I've passed it to a "
+    "human support agent. Your reference is {ticket_id} — an agent will pick it "
+    "up and follow up with you. If you think of any extra detail meanwhile, add "
+    "it here and it'll reach them."
+)
+
 CONFIRM_MATCH_ID = """
 
 The player has provided Match ID {match_id}, and support ticket {ticket_id} has \
@@ -110,6 +129,16 @@ _STOPWORDS = frozenset(
 # roughly "appears in six chunks or fewer".
 _DISTINCTIVE_IDF = 3.0
 
+# Measured on this corpus: real questions bottom out around 0.74 top cosine
+# ("my game crashed" 0.742), while vague ones top out around 0.738 ("game").
+# The floor sits just under the clear band, so borderline queries get answered
+# rather than interrogated — being asked to rephrase a fair question is worse
+# than a slightly loose answer.
+_VAGUE_COSINE_FLOOR = 0.72
+# A lone content word needs a stronger match to count as a real question:
+# "What are Ticketz?" scores 0.766, "game" only 0.738.
+_LONE_TERM_COSINE = 0.75
+
 
 @dataclass
 class Conversation:
@@ -118,6 +147,7 @@ class Conversation:
     history: list[dict] = field(default_factory=list)
     match_id: str | None = None
     match_id_asks: int = 0
+    clarify_asks: int = 0
     ticket_id: str | None = None
 
 
@@ -130,6 +160,10 @@ class Prepared:
     messages: list[dict]
     match_id: str | None = None
     asked_for_match_id: bool = False
+    asked_to_clarify: bool = False
+    escalated: bool = False
+    # When set, this is the reply verbatim and the model is not called at all.
+    canned_reply: str | None = None
     # Reserved but not yet written: if generation fails the ticket never lands,
     # while the model can still quote its reference in the reply.
     ticket: Ticket | None = None
@@ -347,13 +381,37 @@ def _match_id_directive(
     return ASK_FOR_MATCH_ID, None, True
 
 
-def _reserve_ticket(
-    question: str, conversation: Conversation, match_id: str, hits: list[Hit]
-) -> Ticket:
-    """Build the ticket record for a thread that now has a Match ID.
+def is_vague(query: str, hits: list[Hit]) -> bool:
+    """Whether we plausibly understood the question at all.
 
-    The summary is the player's own words describing the problem, not a
-    paraphrase — that is what an agent picking this up actually wants to read.
+    Judged on the condensed search query rather than the raw message, so a
+    context-dependent reply like "I don't have" — which anchoring has already
+    expanded into something specific — is not mistaken for a vague one.
+    """
+    content = _content_terms(query)
+    if not content:
+        return True
+    if not hits:
+        return True
+
+    top = max(h.dense_score for h in hits)
+    if top < _VAGUE_COSINE_FLOOR:
+        return True
+    return len(content) == 1 and top < _LONE_TERM_COSINE
+
+
+def _reserve_ticket(
+    question: str,
+    conversation: Conversation,
+    hits: list[Hit],
+    *,
+    match_id: str | None = None,
+    category: str | None = None,
+) -> Ticket:
+    """Build a ticket record for this thread.
+
+    The summary is the player's own words, not a paraphrase — that is what an
+    agent picking this up actually wants to read.
     """
     issue_text = next(
         (
@@ -363,10 +421,19 @@ def _reserve_ticket(
         ),
         question,
     )
+    if category is None:
+        category = categorise(issue_text)
+    else:
+        # An escalation is about the whole thread, not one matched phrase.
+        issue_text = next(
+            (m["content"] for m in conversation.history if m.get("role") == "user"),
+            question,
+        )
+
     return Ticket(
         ticket_id=new_ticket_id(),
         created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        category=categorise(issue_text),
+        category=category,
         match_id=match_id,
         summary=issue_text.strip(),
         transcript=[*conversation.history, {"role": "user", "content": question}],
@@ -391,11 +458,31 @@ def prepare(
     # A Match ID on a match-level thread is everything an agent needs, so the
     # ticket opens itself. One per thread.
     ticket = None
+    clarify = False
+    escalate = False
+    canned = None
+
     if match_id and not conversation.ticket_id:
-        ticket = _reserve_ticket(question, conversation, match_id, hits)
+        ticket = _reserve_ticket(question, conversation, hits, match_id=match_id)
         directive = CONFIRM_MATCH_ID.format(
             match_id=match_id, ticket_id=ticket.ticket_id
         )
+    elif not directive and is_vague(search_query, hits):
+        # Collecting a Match ID takes precedence: while that is in flight, a
+        # short reply is an answer to our question, not a vague request.
+        if conversation.clarify_asks >= 1:
+            escalate = True
+            if conversation.ticket_id:
+                reference = conversation.ticket_id
+            else:
+                ticket = _reserve_ticket(
+                    question, conversation, hits, category="unclear_request"
+                )
+                reference = ticket.ticket_id
+            canned = ESCALATION_TEXT.format(ticket_id=reference)
+        else:
+            clarify = True
+            directive = ASK_TO_CLARIFY
 
     return Prepared(
         hits=hits,
@@ -403,6 +490,9 @@ def prepare(
         messages=build_messages(question, hits, conversation.history, directive),
         match_id=match_id,
         asked_for_match_id=asked,
+        asked_to_clarify=clarify,
+        escalated=escalate,
+        canned_reply=canned,
         ticket=ticket,
     )
 
@@ -420,6 +510,8 @@ def commit(
         conversation.match_id = prepared.match_id
     if prepared.asked_for_match_id:
         conversation.match_id_asks += 1
+    if prepared.asked_to_clarify:
+        conversation.clarify_asks += 1
     # Written only now, so a failed generation leaves no orphan ticket.
     if prepared.ticket and not conversation.ticket_id:
         write_ticket(prepared.ticket)
@@ -439,13 +531,18 @@ def answer(
     conversation = conversation or Conversation()
     prepared = prepare(index, question, conversation, top_k)
 
-    if not prepared.hits:
+    fixed = prepared.canned_reply or (None if prepared.hits else REFUSAL)
+    if fixed is not None:
         if stream_to is not None:
-            stream_to.write(REFUSAL)
+            stream_to.write(fixed)
             stream_to.flush()
-        commit(conversation, question, REFUSAL, prepared)
+        commit(conversation, question, fixed, prepared)
         return Answer(
-            REFUSAL, [], prepared.search_query, prepared.match_id, prepared.ticket
+            fixed,
+            prepared.hits,
+            prepared.search_query,
+            prepared.match_id,
+            prepared.ticket,
         )
 
     pieces: list[str] = []

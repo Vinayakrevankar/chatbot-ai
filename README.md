@@ -136,6 +136,34 @@ about Match IDs searches for the Match ID topic. This is why the stopword list
 includes contractions, and why `tokenize` normalises typographic apostrophes:
 `don’t` and `don't` have to reach the same place.
 
+### Vague questions
+
+"help", "problem", "not working" cannot be answered from a knowledge base, and
+answering them anyway produces confident nonsense. So the assistant asks once
+for detail, and if the next message is still vague it stops guessing and hands
+off to a human, opening a ticket.
+
+Vagueness is measured, not guessed. The signal is the top dense cosine of the
+retrieved set, which unlike the fused RRF score is calibrated across queries. On
+this corpus real questions bottom out at **0.742** ("my game crashed") and vague
+ones top out at **0.738** ("game"), so the floor sits at 0.72 — deliberately
+just under the clear band, because being asked to rephrase a fair question is
+more annoying than a slightly loose answer. A query with a single content word
+needs 0.75 to count, separating "What are Ticketz?" (0.766) from "game" (0.738).
+
+Two details matter:
+
+- Vagueness is judged on the **condensed** query, not the raw message. "I don't
+  have" has already been anchored to something specific by then, so it is not
+  mistaken for a vague request.
+- Collecting a Match ID takes precedence. While that is in flight a short reply
+  is an answer to the assistant's own question, not a vague request, and must
+  not trigger clarification.
+
+The handoff message is fixed text rather than generated. Escalating is a policy
+outcome, and when the model wrote it, it kept echoing its own previous "could
+you tell me more?" turn instead of closing the loop.
+
 ### Match issues and tickets
 
 Support cannot investigate a crash, an abort, a suspect opponent or a missing

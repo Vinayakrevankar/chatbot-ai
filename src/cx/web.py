@@ -80,9 +80,10 @@ def _stream_reply(req: ChatRequest, session_id: str) -> Iterator[str]:
             ],
         )
 
-        if not prepared.hits:
-            yield _event("token", text=REFUSAL)
-            reply = REFUSAL
+        fixed = prepared.canned_reply or (None if prepared.hits else REFUSAL)
+        if fixed is not None:
+            yield _event("token", text=fixed)
+            reply = fixed
         else:
             pieces: list[str] = []
             for piece in _chat_stream(prepared.messages, req.temperature):

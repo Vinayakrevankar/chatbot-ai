@@ -69,6 +69,10 @@ class Hit:
     score: float
     dense_rank: int | None
     lexical_rank: int | None
+    # Raw cosine against the query. Unlike the fused score this is calibrated
+    # and comparable across queries, which is what makes it usable as a
+    # confidence signal for "did we understand the question at all".
+    dense_score: float = 0.0
 
 
 class Index:
@@ -149,6 +153,7 @@ class Index:
                     score=fused[idx],
                     dense_rank=dense_rank.get(idx),
                     lexical_rank=lexical_rank.get(idx),
+                    dense_score=float(dense[idx]),
                 )
             )
             if len(best) >= top_k:
